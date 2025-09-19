@@ -20,7 +20,7 @@ namespace UsbCopyMon.Service
                 .ConfigureServices((_, services) =>
                 {
                     services.AddSingleton<DeviceMap>();
-                    services.AddSingleton<PipeServer>();      // <--- NEW
+                    services.AddSingleton<PipeServer>();
                     services.AddSingleton<SessionManager>();
                     services.AddSingleton<FileMonitor>();
                     services.AddHostedService<Worker>();
