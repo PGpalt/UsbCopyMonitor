@@ -173,7 +173,7 @@ public sealed class SessionManager
         // Ask the tray synchronously with a short timeout so we don't block forever
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3600));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
             var answer = _pipe.RequestAttributionAsync(rec, cts.Token).GetAwaiter().GetResult();
             rec = rec with { AttributedTo = string.IsNullOrWhiteSpace(answer) ? "Unknown" : answer };
         }

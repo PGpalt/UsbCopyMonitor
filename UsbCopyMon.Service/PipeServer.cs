@@ -6,8 +6,8 @@ namespace UsbCopyMon.Service;
 
 public sealed class PipeServer // name kept as you used before (acts as a client)
 {
-    private const int ConnectTimeoutMs = 3600000;
-    private const int RoundtripTimeoutMs = 3600000;
+    private const int ConnectTimeoutMs = 4000;
+    private const int RoundtripTimeoutMs = 4000;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
