@@ -20,7 +20,8 @@ public partial class PromptWindow : Window
             $"From: {log.SourcePath}\n" +
             $"To:   {log.DestPath}\n" +
             $"Files: {filesPreview}\n" +
-            $"Time:  {log.Timestamp.LocalDateTime}";
+            $"Time:  {log.Timestamp.LocalDateTime}\n" +
+            $"User: {log.User}";
 
         // Pre-fill with the process user who wrote files, as a hint
         NameBox.Text = log.User;
