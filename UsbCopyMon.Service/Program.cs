@@ -10,11 +10,17 @@ namespace UsbCopyMon.Service
                 {
                     b.ClearProviders();
                     b.AddSimpleConsole();
-                    b.SetMinimumLevel(LogLevel.Warning); // keep quiet
+                    b.AddEventLog(o =>
+                    {
+                        o.SourceName = "UsbCopyMon.Service";
+                        o.LogName = "Application";
+                    });
+                    b.SetMinimumLevel(LogLevel.Information);
                 })
                 .ConfigureServices((_, services) =>
                 {
                     services.AddSingleton<DeviceMap>();
+                    services.AddSingleton<PipeServer>();      // <--- NEW
                     services.AddSingleton<SessionManager>();
                     services.AddSingleton<FileMonitor>();
                     services.AddHostedService<Worker>();

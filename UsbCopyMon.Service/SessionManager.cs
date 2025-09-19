@@ -7,6 +7,7 @@ namespace UsbCopyMon.Service;
 public sealed class SessionManager
 {
     private readonly DeviceMap _devices;
+    private readonly PipeServer _pipe;
 
     // Active sessions keyed by (pid, devId)
     private readonly ConcurrentDictionary<(int pid, string devId), TransferSession> _open = new();
@@ -21,13 +22,14 @@ public sealed class SessionManager
     private readonly TimeSpan _idle = TimeSpan.FromSeconds(10);
     private readonly string _logDir;
 
-    public SessionManager(DeviceMap devices)
+    public SessionManager(DeviceMap devices, PipeServer pipe)
     {
         _devices = devices;
         _logDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "UsbCopyMon", "logs");
         Directory.CreateDirectory(_logDir);
+        _pipe = pipe;
     }
 
     // ---------------- API called by FileMonitor ----------------
@@ -165,12 +167,24 @@ public sealed class SessionManager
             SourcePath: sourcePath,
             DestPath: destPath,
             DeviceName: deviceName,
-            FileNames: fileNames);
+            FileNames: fileNames,
+            AttributedTo: null);
+
+        // Ask the tray synchronously with a short timeout so we don't block forever
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var answer = _pipe.RequestAttributionAsync(rec, cts.Token).GetAwaiter().GetResult();
+            rec = rec with { AttributedTo = string.IsNullOrWhiteSpace(answer) ? "Unknown" : answer };
+        }
+        catch
+        {
+            rec = rec with { AttributedTo = "Unknown" };
+        }
 
         var path = Path.Combine(_logDir, $"{DateTime.UtcNow:yyyyMMdd}.jsonl");
         File.AppendAllText(path, JsonSerializer.Serialize(rec) + Environment.NewLine);
     }
-
     // ---------------- Helpers ----------------
 
     private void PurgeOldHints()
