@@ -1,38 +1,28 @@
-﻿using System.Linq;
-using System.Windows;
-using UsbCopyMon.Shared;
+﻿using System.Windows;
 
-namespace UsbCopyMon.Tray;
-
-public partial class PromptWindow : Window
+namespace UsbCopyMon.Tray
 {
-    public string? Answer { get; private set; }
-
-    public PromptWindow(CopyLog log)
+    public partial class PromptWindow : Window
     {
-        InitializeComponent();
+        public string? Answer { get; private set; }
 
-        var filesPreview = string.Join(", ", log.FileNames.Take(3));
-        if (log.FileNames.Count > 3) filesPreview += $" (+{log.FileNames.Count - 3} more)";
+        // Minimal prompt: only ask for a name
+        public PromptWindow(string? suggestedName)
+        {
+            InitializeComponent();
 
-        Summary.Text =
-            $"Device: {log.DeviceName}\n" +
-            $"From: {log.SourcePath}\n" +
-            $"To:   {log.DestPath}\n" +
-            $"Files: {filesPreview}\n" +
-            $"Time:  {log.Timestamp.LocalDateTime}\n" +
-            $"User: {log.User}";
+            // Pre-fill with suggested name (e.g., process user)
+            NameBox.Text = suggestedName ?? string.Empty;
+            NameBox.SelectAll();
 
-        // Pre-fill with the process user who wrote files, as a hint
-        NameBox.Text = log.User;
-        NameBox.SelectAll();
-        NameBox.Focus();
-    }
+            Loaded += (_, __) => NameBox.Focus();
+        }
 
-    private void OkBtn_Click(object sender, RoutedEventArgs e)
-    {
-        Answer = NameBox.Text?.Trim();
-        DialogResult = true;
-        Close();
+        private void OkBtn_Click(object sender, RoutedEventArgs e)
+        {
+            Answer = NameBox.Text?.Trim();
+            DialogResult = true;
+            Close();
+        }
     }
 }

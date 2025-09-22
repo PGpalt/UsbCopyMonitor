@@ -80,7 +80,6 @@ public sealed class TrayHost : IDisposable
         );
     }
 
-
     private static PipeSecurity BuildPipeSecurity()
     {
         var ps = new PipeSecurity();
@@ -120,10 +119,10 @@ public sealed class TrayHost : IDisposable
             var log = JsonSerializer.Deserialize<CopyLog>(buf, JsonOpts)
                       ?? throw new InvalidDataException("Bad JSON request.");
 
-            // Ask the user on the UI thread
+            // Minimal UI: ignore log details; use only log.User as a suggested name
             var answer = await Application.Current.Dispatcher.InvokeAsync<string?>(() =>
             {
-                var dlg = new PromptWindow(log);
+                var dlg = new PromptWindow(log.User);
                 var ok = dlg.ShowDialog() == true;
                 return ok ? dlg.Answer : null;
             });

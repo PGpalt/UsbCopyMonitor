@@ -88,6 +88,10 @@ public sealed class SessionManager
         var s = _open.GetOrAdd(key, _ => new TransferSession(when, user, usbDev!));
         s.Touch(when);
 
+        // Start the minimal attribution prompt immediately on first encounter
+        s.EnsureAttributionStarted(_pipe, BuildMinimalCopyLog(s, when));
+
+        // Keep accumulating activity and pairs
         s.AddWrite(destPath, bytes, isUsbDest);
         if (haveHint) s.AddPair(destPath, srcHint.Path);
 
@@ -160,6 +164,11 @@ public sealed class SessionManager
                                 .Distinct(StringComparer.OrdinalIgnoreCase)
                                 .ToList();
 
+        // Use the previously captured attribution (if any). No prompting here.
+        var attributedTo = s.TryGetAttribution(out var who) && !string.IsNullOrWhiteSpace(who)
+            ? who!
+            : "Unknown";
+
         var rec = new CopyLog(
             Timestamp: s.Started,
             Computer: Environment.MachineName,
@@ -168,24 +177,29 @@ public sealed class SessionManager
             DestPath: destPath,
             DeviceName: deviceName,
             FileNames: fileNames,
-            AttributedTo: null);
-
-        // Ask the tray synchronously with a short timeout so we don't block forever
-        try
-        {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3600));
-            var answer = _pipe.RequestAttributionAsync(rec, cts.Token).GetAwaiter().GetResult();
-            rec = rec with { AttributedTo = string.IsNullOrWhiteSpace(answer) ? "Unknown" : answer };
-        }
-        catch
-        {
-            rec = rec with { AttributedTo = "Unknown" };
-        }
+            AttributedTo: attributedTo);
 
         var path = Path.Combine(_logDir, $"{DateTime.UtcNow:yyyyMMdd}.jsonl");
         File.AppendAllText(path, JsonSerializer.Serialize(rec) + Environment.NewLine);
     }
+
     // ---------------- Helpers ----------------
+
+    private CopyLog BuildMinimalCopyLog(TransferSession s, DateTime when)
+    {
+        // Only send what's needed to pre-fill the prompt (no paths/file lists)
+        var deviceName = string.IsNullOrWhiteSpace(s.Device.Label) ? s.Device.DriveLetter : s.Device.Label;
+        return new CopyLog(
+            Timestamp: new DateTimeOffset(when),
+            Computer: Environment.MachineName,
+            User: s.User,              // used to pre-fill textbox
+            SourcePath: "",            // intentionally blank
+            DestPath: "",              // intentionally blank
+            DeviceName: deviceName,    // optional; tray may ignore
+            FileNames: new List<string>(),
+            AttributedTo: null
+        );
+    }
 
     private void PurgeOldHints()
     {
@@ -280,6 +294,11 @@ public sealed class SessionManager
 
         private readonly List<(string Dest, string Src)> _pairs = new();
 
+        // attribution state
+        private readonly object _attrLock = new();
+        private Task? _attrTask;
+        private string? _attributedTo;
+
         public TransferSession(DateTime started, string user, DeviceInfo device)
         {
             Started = new DateTimeOffset(started);
@@ -302,5 +321,35 @@ public sealed class SessionManager
 
         public List<string> MatchedDestFiles() => _pairs.Select(p => p.Dest).ToList();
         public List<string> MatchedSourceFiles() => _pairs.Select(p => p.Src).ToList();
+
+        public bool EnsureAttributionStarted(PipeServer pipe, CopyLog seed)
+        {
+            lock (_attrLock)
+            {
+                if (_attrTask != null) return false; // already started
+
+                _attrTask = Task.Run(async () =>
+                {
+                    try
+                    {
+                        using var cts = new CancellationTokenSource(TimeSpan.FromHours(1));
+                        var answer = await pipe.RequestAttributionAsync(seed, cts.Token);
+                        _attributedTo = string.IsNullOrWhiteSpace(answer) ? "Unknown" : answer;
+                    }
+                    catch
+                    {
+                        _attributedTo = "Unknown";
+                    }
+                });
+
+                return true;
+            }
+        }
+
+        public bool TryGetAttribution(out string? who)
+        {
+            who = _attributedTo;
+            return !string.IsNullOrWhiteSpace(who);
+        }
     }
 }
