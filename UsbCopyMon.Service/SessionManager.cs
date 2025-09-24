@@ -9,13 +9,8 @@ public sealed class SessionManager
     private readonly DeviceMap _devices;
     private readonly PipeServer _pipe;
 
-    // Active sessions keyed by (pid, devId)
     private readonly ConcurrentDictionary<(int pid, string devId), TransferSession> _open = new();
-
-    // Quick index: pid -> devId
     private readonly ConcurrentDictionary<int, string> _activeByPid = new();
-
-    // Recent READ hints to pair with WRITEs
     private readonly ConcurrentDictionary<int, Dictionary<string, ReadHint>> _readHints = new();
     private readonly TimeSpan _hintTtl = TimeSpan.FromSeconds(5);
 
@@ -47,10 +42,7 @@ public sealed class SessionManager
             isUsb ? _devices.ResolveForPath(path) : null);
 
         var dict = _readHints.GetOrAdd(pid, _ => new Dictionary<string, ReadHint>(StringComparer.OrdinalIgnoreCase));
-        lock (dict)
-        {
-            dict[basename] = hint;
-        }
+        lock (dict) { dict[basename] = hint; }
     }
 
     public void RecordWrite(int pid, DateTime when, string destPath, long bytes, string? writeUser, bool isUsbDest)
@@ -88,10 +80,9 @@ public sealed class SessionManager
         var s = _open.GetOrAdd(key, _ => new TransferSession(when, user, usbDev!));
         s.Touch(when);
 
-        // Start the minimal attribution prompt immediately on first encounter
-        s.EnsureAttributionStarted(_pipe, BuildMinimalCopyLog(s, when));
+        // Start the attribution prompt immediately on first write, with suggested name (process user).
+        s.EnsureAttributionStarted(_pipe, s.User);
 
-        // Keep accumulating activity and pairs
         s.AddWrite(destPath, bytes, isUsbDest);
         if (haveHint) s.AddPair(destPath, srcHint.Path);
 
@@ -164,7 +155,6 @@ public sealed class SessionManager
                                 .Distinct(StringComparer.OrdinalIgnoreCase)
                                 .ToList();
 
-        // Use the previously captured attribution (if any). No prompting here.
         var attributedTo = s.TryGetAttribution(out var who) && !string.IsNullOrWhiteSpace(who)
             ? who!
             : "Unknown";
@@ -184,22 +174,6 @@ public sealed class SessionManager
     }
 
     // ---------------- Helpers ----------------
-
-    private CopyLog BuildMinimalCopyLog(TransferSession s, DateTime when)
-    {
-        // Only send what's needed to pre-fill the prompt (no paths/file lists)
-        var deviceName = string.IsNullOrWhiteSpace(s.Device.Label) ? s.Device.DriveLetter : s.Device.Label;
-        return new CopyLog(
-            Timestamp: new DateTimeOffset(when),
-            Computer: Environment.MachineName,
-            User: s.User,              // used to pre-fill textbox
-            SourcePath: "",            // intentionally blank
-            DestPath: "",              // intentionally blank
-            DeviceName: deviceName,    // optional; tray may ignore
-            FileNames: new List<string>(),
-            AttributedTo: null
-        );
-    }
 
     private void PurgeOldHints()
     {
@@ -259,8 +233,6 @@ public sealed class SessionManager
         return Path.GetDirectoryName(paths[0]) ?? "";
     }
 
-    // ---------------- Nested classes ----------------
-
     private readonly struct ReadHint
     {
         public DateTimeOffset When { get; }
@@ -294,7 +266,6 @@ public sealed class SessionManager
 
         private readonly List<(string Dest, string Src)> _pairs = new();
 
-        // attribution state
         private readonly object _attrLock = new();
         private Task? _attrTask;
         private string? _attributedTo;
@@ -316,24 +287,22 @@ public sealed class SessionManager
         }
 
         public void AddNonUsb(string path, long bytes) => NonUsbFiles.Add(path);
-
         public void AddPair(string dest, string src) => _pairs.Add((dest, src));
-
         public List<string> MatchedDestFiles() => _pairs.Select(p => p.Dest).ToList();
         public List<string> MatchedSourceFiles() => _pairs.Select(p => p.Src).ToList();
 
-        public bool EnsureAttributionStarted(PipeServer pipe, CopyLog seed)
+        // CHANGED: pass suggestedName to the pipe
+        public bool EnsureAttributionStarted(PipeServer pipe, string? suggestedName)
         {
             lock (_attrLock)
             {
                 if (_attrTask != null) return false; // already started
-
                 _attrTask = Task.Run(async () =>
                 {
                     try
                     {
                         using var cts = new CancellationTokenSource(TimeSpan.FromHours(1));
-                        var answer = await pipe.RequestAttributionAsync(seed, cts.Token);
+                        var answer = await pipe.RequestAttributionAsync(suggestedName, cts.Token);
                         _attributedTo = string.IsNullOrWhiteSpace(answer) ? "Unknown" : answer;
                     }
                     catch
@@ -341,7 +310,6 @@ public sealed class SessionManager
                         _attributedTo = "Unknown";
                     }
                 });
-
                 return true;
             }
         }
