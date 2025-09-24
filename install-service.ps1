@@ -1,5 +1,5 @@
 param(
-  [string]$PublishDir = "UsbCopyMon.Service\bin\Release\net8.0-windows10.0.19041.0\win-x64\publish",
+  [string]$PublishDir = "UsbCopyMon.Service\bin\Release\net8.0-windows\win-x64\publish",
   [string]$ServiceName = "UsbCopyMonService"
 )
 
@@ -23,7 +23,7 @@ sc.exe start $ServiceName | Out-Null
 Get-Process -Name "UsbCopyMon.Tray" -ErrorAction SilentlyContinue | Stop-Process -Force
 
 # Start the Tray application
-$trayExe = Resolve-Path ".\UsbCopyMon.Tray\bin\Release\net8.0-windows10.0.19041.0\publish\win-x64\UsbCopyMon.Tray.exe"
+$trayExe = Resolve-Path ".\UsbCopyMon.Tray\bin\Release\net8.0-windows\publish\UsbCopyMon.Tray.exe"
 Start-Process -FilePath "$trayExe"
 
 Write-Host "Installed and started $ServiceName from $exe"

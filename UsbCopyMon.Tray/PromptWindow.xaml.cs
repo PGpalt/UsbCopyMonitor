@@ -1,4 +1,6 @@
-﻿using System.Windows;
+﻿// PromptWindow.xaml.cs
+using System;
+using System.Windows;
 
 namespace UsbCopyMon.Tray
 {
@@ -6,22 +8,26 @@ namespace UsbCopyMon.Tray
     {
         public string? Answer { get; private set; }
 
-        // Minimal prompt: only ask for a name
         public PromptWindow(string? suggestedName)
         {
             InitializeComponent();
-
-            // Pre-fill with suggested name (e.g., process user)
-            NameBox.Text = suggestedName ?? string.Empty;
+            NameBox.Text = string.IsNullOrWhiteSpace(suggestedName)
+                ? Environment.UserName
+                : suggestedName;
             NameBox.SelectAll();
-
-            Loaded += (_, __) => NameBox.Focus();
+            NameBox.Focus();
         }
 
         private void OkBtn_Click(object sender, RoutedEventArgs e)
         {
             Answer = NameBox.Text?.Trim();
             DialogResult = true;
+            Close();
+        }
+
+        private void CancelBtn_Click(object sender, RoutedEventArgs e)
+        {
+            DialogResult = false;
             Close();
         }
     }
