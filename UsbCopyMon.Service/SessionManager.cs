@@ -149,7 +149,14 @@ public sealed class SessionManager
 
         var deviceName = string.IsNullOrWhiteSpace(s.Device.Label) ? s.Device.DriveLetter : s.Device.Label;
 
-        var fileNames = destList.Select(Path.GetFileName)
+        static string FileNameNoAds(string path)
+        {
+            var name = Path.GetFileName(path) ?? string.Empty;
+            var idx = name.IndexOf(':');        // first ':' in filename => ADS
+            return idx >= 0 ? name[..idx] : name;
+        }
+
+        var fileNames = destList.Select(FileNameNoAds)
                                 .Where(n => !string.IsNullOrEmpty(n))
                                 .Select(n => n!)
                                 .Distinct(StringComparer.OrdinalIgnoreCase)
