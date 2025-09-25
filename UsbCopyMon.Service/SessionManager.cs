@@ -1,5 +1,9 @@
 ﻿using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 using UsbCopyMon.Shared;
 
 namespace UsbCopyMon.Service;
@@ -8,6 +12,7 @@ public sealed class SessionManager
 {
     private readonly DeviceMap _devices;
     private readonly PipeServer _pipe;
+    private readonly IOptionsMonitor<UsbCopyMonOptions> _opts;
 
     private readonly ConcurrentDictionary<(int pid, string devId), TransferSession> _open = new();
     private readonly ConcurrentDictionary<int, string> _activeByPid = new();
@@ -17,14 +22,16 @@ public sealed class SessionManager
     private readonly TimeSpan _idle = TimeSpan.FromSeconds(10);
     private readonly string _logDir;
 
-    public SessionManager(DeviceMap devices, PipeServer pipe)
+    public SessionManager(DeviceMap devices, PipeServer pipe, IOptionsMonitor<UsbCopyMonOptions> opts)
     {
         _devices = devices;
+        _pipe = pipe;
+        _opts = opts;
+
         _logDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "UsbCopyMon", "logs");
         Directory.CreateDirectory(_logDir);
-        _pipe = pipe;
     }
 
     // ---------------- API called by FileMonitor ----------------
@@ -80,8 +87,9 @@ public sealed class SessionManager
         var s = _open.GetOrAdd(key, _ => new TransferSession(when, user, usbDev!));
         s.Touch(when);
 
-        // Start the attribution prompt immediately on first write, with suggested name (process user).
-        s.EnsureAttributionStarted(_pipe, s.User);
+        // Respect config: only start attribution if prompts are enabled
+        if (_opts.CurrentValue.PromptEnabled)
+            s.EnsureAttributionStarted(_pipe, s.User);
 
         s.AddWrite(destPath, bytes, isUsbDest);
         if (haveHint) s.AddPair(destPath, srcHint.Path);
@@ -106,7 +114,13 @@ public sealed class SessionManager
     {
         while (!ct.IsCancellationRequested)
         {
-            try { Sweep(); } catch { /* ignore */ }
+            try
+            {
+                Sweep();
+                EnforceRetention();  // <--- enforce retention here
+            }
+            catch { /* ignore */ }
+
             await Task.Delay(2000, ct);
         }
     }
@@ -149,18 +163,19 @@ public sealed class SessionManager
 
         var deviceName = string.IsNullOrWhiteSpace(s.Device.Label) ? s.Device.DriveLetter : s.Device.Label;
 
-        static string FileNameNoAds(string path)
+        // Helper strips ADS like ":Zone.Identifier:$DATA"
+        static string FileNameSansAds(string path)
         {
             var name = Path.GetFileName(path) ?? string.Empty;
-            var idx = name.IndexOf(':');        // first ':' in filename => ADS
+            var idx = name.IndexOf(':');
             return idx >= 0 ? name[..idx] : name;
         }
 
-        var fileNames = destList.Select(FileNameNoAds)
-                                .Where(n => !string.IsNullOrEmpty(n))
-                                .Select(n => n!)
-                                .Distinct(StringComparer.OrdinalIgnoreCase)
-                                .ToList();
+        var fileNames = destList
+            .Select(p => FileNameSansAds(p))
+            .Where(n => !string.IsNullOrEmpty(n))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
         var attributedTo = s.TryGetAttribution(out var who) && !string.IsNullOrWhiteSpace(who)
             ? who!
@@ -176,8 +191,75 @@ public sealed class SessionManager
             FileNames: fileNames,
             AttributedTo: attributedTo);
 
-        var path = Path.Combine(_logDir, $"{DateTime.UtcNow:yyyyMMdd}.jsonl");
-        File.AppendAllText(path, JsonSerializer.Serialize(rec) + Environment.NewLine);
+        var json = JsonSerializer.Serialize(rec);
+
+        // Local file write (configurable)
+        if (_opts.CurrentValue.LocalLoggingEnabled)
+        {
+            var path = Path.Combine(_logDir, $"{DateTime.UtcNow:yyyyMMdd}.jsonl");
+            File.AppendAllText(path, json + Environment.NewLine);
+        }
+
+        // Optional UDP send (fire-and-forget)
+        var udp = _opts.CurrentValue.Udp;
+        if (udp is not null && udp.Enabled)
+        {
+            _ = Task.Run(() => SendUdpSafe(json, udp.Ip, udp.Port));
+        }
+    }
+
+    // ---------------- UDP helper ----------------
+
+    private static void SendUdpSafe(string payload, string ip, int port)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(ip) || port <= 0 || port > 65535) return;
+
+            using var client = new UdpClient();
+            client.Connect(IPAddress.Parse(ip), port);
+            var bytes = Encoding.UTF8.GetBytes(payload);
+            client.Send(bytes, bytes.Length);
+        }
+        catch
+        {
+            // swallow: logging over UDP is best-effort
+        }
+    }
+
+    // ---------------- Retention ----------------
+
+    private void EnforceRetention()
+    {
+        var days = _opts.CurrentValue.RetentionDays;
+        if (days <= 0) return; // disabled
+
+        try
+        {
+            var cutoff = DateTime.UtcNow.Date.AddDays(-days);
+            foreach (var f in Directory.EnumerateFiles(_logDir, "*.jsonl", SearchOption.TopDirectoryOnly))
+            {
+                // file names are yyyyMMdd.jsonl; prefer filesystem time as general fallback
+                var fi = new FileInfo(f);
+                var lastWrite = fi.LastWriteTimeUtc;
+
+                // If filename matches yyyymmdd, parse it (more accurate for our scheme)
+                if (DateTime.TryParseExact(Path.GetFileNameWithoutExtension(f),
+                                           "yyyyMMdd",
+                                           provider: null,
+                                           System.Globalization.DateTimeStyles.AssumeUniversal,
+                                           out var fromName))
+                {
+                    lastWrite = fromName.ToUniversalTime();
+                }
+
+                if (lastWrite < cutoff)
+                {
+                    try { File.Delete(f); } catch { /* ignore one-off delete errors */ }
+                }
+            }
+        }
+        catch { /* ignore */ }
     }
 
     // ---------------- Helpers ----------------
@@ -298,7 +380,6 @@ public sealed class SessionManager
         public List<string> MatchedDestFiles() => _pairs.Select(p => p.Dest).ToList();
         public List<string> MatchedSourceFiles() => _pairs.Select(p => p.Src).ToList();
 
-        // CHANGED: pass suggestedName to the pipe
         public bool EnsureAttributionStarted(PipeServer pipe, string? suggestedName)
         {
             lock (_attrLock)
