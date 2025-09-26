@@ -6,6 +6,8 @@ public sealed class UsbCopyMonOptions
     public bool LocalLoggingEnabled { get; set; } = true;
     public UdpOptions Udp { get; set; } = new();
     public int RetentionDays { get; set; } = 7; // keep last 7 days by default
+
+    public int RetentionMinutes { get; set; } = 0; // 0 = disabled
 }
 
 public sealed class UdpOptions

@@ -17,16 +17,22 @@ public sealed class SessionManager
     private readonly ConcurrentDictionary<(int pid, string devId), TransferSession> _open = new();
     private readonly ConcurrentDictionary<int, string> _activeByPid = new();
     private readonly ConcurrentDictionary<int, Dictionary<string, ReadHint>> _readHints = new();
-    private readonly TimeSpan _hintTtl = TimeSpan.FromSeconds(5);
+    private readonly TimeSpan _hintTtl = TimeSpan.FromSeconds(60);
 
     private readonly TimeSpan _idle = TimeSpan.FromSeconds(10);
     private readonly string _logDir;
+    private readonly ILogger<SessionManager> _log;
 
-    public SessionManager(DeviceMap devices, PipeServer pipe, IOptionsMonitor<UsbCopyMonOptions> opts)
+    public SessionManager(DeviceMap devices, PipeServer pipe, IOptionsMonitor<UsbCopyMonOptions> opts, ILogger<SessionManager> log)
     {
         _devices = devices;
         _pipe = pipe;
         _opts = opts;
+        _log = log;
+
+        _log.LogInformation("Config loaded from {Base}", AppContext.BaseDirectory);
+        _log.LogInformation("UsbCopyMon options: {@opts}", _opts.CurrentValue);
+        _opts.OnChange(o => _log.LogInformation("UsbCopyMon options reloaded: {@opts}", o));
 
         _logDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
@@ -193,6 +199,9 @@ public sealed class SessionManager
 
         var json = JsonSerializer.Serialize(rec);
 
+        _log.LogInformation("Session closed: {User} → {Device} | {Count} files",
+                    s.User, s.Device.Label ?? s.Device.DriveLetter, fileNames.Count);
+        _log.LogDebug("  Details: {@rec}", rec);
         // Local file write (configurable)
         if (_opts.CurrentValue.LocalLoggingEnabled)
         {
@@ -231,32 +240,33 @@ public sealed class SessionManager
 
     private void EnforceRetention()
     {
+        var minutes = _opts.CurrentValue.RetentionMinutes;
         var days = _opts.CurrentValue.RetentionDays;
-        if (days <= 0) return; // disabled
+
+        // Decide cutoff
+        DateTime cutoffUtc;
+        if (minutes > 0)
+            cutoffUtc = DateTime.UtcNow.AddMinutes(-minutes);
+        else if (days > 0)
+            cutoffUtc = DateTime.UtcNow.Date.AddDays(-days);
+        else
+            return; // retention disabled
 
         try
         {
-            var cutoff = DateTime.UtcNow.Date.AddDays(-days);
             foreach (var f in Directory.EnumerateFiles(_logDir, "*.jsonl", SearchOption.TopDirectoryOnly))
             {
-                // file names are yyyyMMdd.jsonl; prefer filesystem time as general fallback
-                var fi = new FileInfo(f);
-                var lastWrite = fi.LastWriteTimeUtc;
-
-                // If filename matches yyyymmdd, parse it (more accurate for our scheme)
-                if (DateTime.TryParseExact(Path.GetFileNameWithoutExtension(f),
-                                           "yyyyMMdd",
-                                           provider: null,
-                                           System.Globalization.DateTimeStyles.AssumeUniversal,
-                                           out var fromName))
+                try
                 {
-                    lastWrite = fromName.ToUniversalTime();
-                }
+                    var fi = new FileInfo(f);
+                    var last = fi.LastWriteTimeUtc; // <-- use filesystem time only
 
-                if (lastWrite < cutoff)
-                {
-                    try { File.Delete(f); } catch { /* ignore one-off delete errors */ }
+                    if (last < cutoffUtc)
+                    {
+                        File.Delete(f);
+                    }
                 }
+                catch { /* ignore per-file errors */ }
             }
         }
         catch { /* ignore */ }

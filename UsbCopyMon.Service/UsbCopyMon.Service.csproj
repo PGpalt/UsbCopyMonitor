@@ -17,8 +17,9 @@
 		<ProjectReference Include="..\\UsbCopyMon.Shared\\UsbCopyMon.Shared.csproj" />
 	</ItemGroup>
 	<ItemGroup>
+		<!-- Keep appsettings.json next to the EXE for build & publish -->
 		<None Update="appsettings.json">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
 		</None>
 	</ItemGroup>
 </Project>
