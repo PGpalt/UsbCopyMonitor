@@ -19,6 +19,13 @@ if (Get-Service $ServiceName -ErrorAction SilentlyContinue) {
 sc.exe create $ServiceName binPath= $exePath start= auto | Out-Null
 sc.exe start $ServiceName | Out-Null
 
+sc.exe failure "UsbCopyMonService" actions= restart/5000/restart/5000/restart/5000 reset= 86400 
+sc.exe failureflag "UsbCopyMonService" 1
+
+sc.exe qfailure "UsbCopyMonService"
+
+sc.exe config "UsbCopyMonService" start= delayed-auto
+
 # Stop the Tray application by its name (if running)
 Get-Process -Name "UsbCopyMon.Tray" -ErrorAction SilentlyContinue | Stop-Process -Force
 
