@@ -210,7 +210,7 @@ public sealed class SessionManager
         }
 
         // Optional UDP send (fire-and-forget)
-        var udp = _opts.CurrentValue.Udp;
+        var udp = _opts.CurrentValue.Syslog;
         if (udp is not null && udp.Enabled)
         {
             _ = Task.Run(() => SendUdpSafe(json, udp.Ip, udp.Port));
