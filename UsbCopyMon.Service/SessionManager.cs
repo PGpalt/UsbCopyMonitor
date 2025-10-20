@@ -15,7 +15,8 @@ public sealed class SessionManager
     private readonly IOptionsMonitor<UsbCopyMonOptions> _opts;
 
     private readonly ConcurrentDictionary<(int pid, string devId), TransferSession> _open = new();
-    private readonly ConcurrentDictionary<int, string> _activeByPid = new();
+
+    // Read hints: only from PC (non-USB) to infer SourcePath for PC → USB copies.
     private readonly ConcurrentDictionary<int, Dictionary<string, ReadHint>> _readHints = new();
     private readonly TimeSpan _hintTtl = TimeSpan.FromSeconds(60);
 
@@ -42,7 +43,11 @@ public sealed class SessionManager
 
     // ---------------- API called by FileMonitor ----------------
 
-    public void HintRead(int pid, DateTime when, string path, bool isUsb, string user)
+    /// <summary>
+    /// Keep a short-lived hint for a filename read from PC storage, so we can pair it
+    /// with a subsequent write to USB and populate SourcePath.
+    /// </summary>
+    public void HintRead(int pid, DateTime when, string path, string user)
     {
         var basename = Path.GetFileName(path);
         if (string.IsNullOrEmpty(basename)) return;
@@ -50,68 +55,51 @@ public sealed class SessionManager
         var hint = new ReadHint(
             new DateTimeOffset(when),
             path,
-            isUsb,
-            user ?? string.Empty,
-            isUsb ? _devices.ResolveForPath(path) : null);
+            user ?? string.Empty
+        );
 
         var dict = _readHints.GetOrAdd(pid, _ => new Dictionary<string, ReadHint>(StringComparer.OrdinalIgnoreCase));
         lock (dict) { dict[basename] = hint; }
     }
 
-    public void RecordWrite(int pid, DateTime when, string destPath, long bytes, string? writeUser, bool isUsbDest)
+    /// <summary>
+    /// Records a write whose destination is on a USB device. This is the only write path we keep,
+    /// effectively filtering to PC → USB transfers only. We try to pair with a prior PC read to fill SourcePath.
+    /// </summary>
+    public void RecordUsbDestinationWrite(int pid, DateTime when, string destPath, long bytes, string? writeUser)
     {
         var basename = Path.GetFileName(destPath);
         if (string.IsNullOrEmpty(basename)) return;
 
+        // Resolve the USB device for the destination (must exist by the time we get here).
+        var usbDev = _devices.ResolveForPath(destPath);
+        if (usbDev is null) return; // defensive guard
+
+        // Try to find a PC-side read hint for the same filename
         _readHints.TryGetValue(pid, out var samePidMap);
         ReadHint srcHint = default;
-        var haveHint = samePidMap is not null
-                       && TryGetValidOppositeHint(samePidMap, basename, isUsbDest, out srcHint);
+        var haveHint = samePidMap is not null && TryGetValidHint(samePidMap, basename, out srcHint);
 
         if (!haveHint)
-            haveHint = TryFindHintAnyPid(basename, !isUsbDest, out srcHint, writeUser ?? "");
-
-        string? devId = null;
-        DeviceInfo? usbDev = null;
-        if (isUsbDest)
-        {
-            usbDev = _devices.ResolveForPath(destPath);
-            devId = usbDev?.PnpId;
-        }
-        else if (haveHint && srcHint.IsUsb && srcHint.Device is not null)
-        {
-            usbDev = srcHint.Device;
-            devId = usbDev.PnpId;
-        }
-        if (string.IsNullOrEmpty(devId)) return;
+            haveHint = TryFindHintAnyPid(basename, out srcHint, writeUser ?? "");
 
         var user = !string.IsNullOrEmpty(srcHint.User) ? srcHint.User
                  : !string.IsNullOrEmpty(writeUser) ? writeUser!
                  : "Unknown";
 
-        var key = (pid, devId!);
-        var s = _open.GetOrAdd(key, _ => new TransferSession(when, user, usbDev!));
+        var key = (pid, usbDev.PnpId);
+        var s = _open.GetOrAdd(key, _ => new TransferSession(when, user, usbDev));
         s.Touch(when);
 
         // Respect config: only start attribution if prompts are enabled
         if (_opts.CurrentValue.PromptEnabled)
             s.EnsureAttributionStarted(_pipe, s.User);
 
-        s.AddWrite(destPath, bytes, isUsbDest);
+        // Record the USB-destination write.
+        s.AddUsbWrite(destPath, bytes);
+
+        // If we found a PC source hint, remember the pairing so SourcePath can be set.
         if (haveHint) s.AddPair(destPath, srcHint.Path);
-
-        _activeByPid[pid] = devId!;
-    }
-
-    public void AddNonUsbIfPaired(int pid, DateTime when, string filePath, long bytes)
-    {
-        if (!_activeByPid.TryGetValue(pid, out var devId)) return;
-        var key = (pid, devId);
-        if (_open.TryGetValue(key, out var s))
-        {
-            s.Touch(when);
-            s.AddNonUsb(filePath, bytes);
-        }
     }
 
     // ---------------- Background loop ----------------
@@ -123,7 +111,7 @@ public sealed class SessionManager
             try
             {
                 Sweep();
-                EnforceRetention();  // <--- enforce retention here
+                EnforceRetention();
             }
             catch { /* ignore */ }
 
@@ -141,9 +129,6 @@ public sealed class SessionManager
             if (now - kv.Value.LastActivity > _idle &&
                 _open.TryRemove(kv.Key, out var sess))
             {
-                if (_activeByPid.TryGetValue(kv.Key.pid, out var cur) && cur == kv.Key.devId)
-                    _activeByPid.TryRemove(kv.Key.pid, out _);
-
                 CloseAndWrite(sess);
             }
         }
@@ -154,18 +139,13 @@ public sealed class SessionManager
         var matchedDest = s.MatchedDestFiles();
         var matchedSrc = s.MatchedSourceFiles();
 
-        bool usePairs = matchedDest.Count > 0 && matchedSrc.Count > 0;
+        // If we have pairings, use them to determine SourcePath (PC) and DestPath (USB).
+        // Otherwise, we still log DestPath from USB writes and leave SourcePath empty (best-effort).
+        var destList = s.UsbFiles;
+        var srcList = matchedSrc.Count > 0 ? matchedSrc : new List<string>();
 
-        var destList = usePairs
-            ? matchedDest
-            : (s.UsbWriteBytes >= s.NonUsbWriteBytes ? s.UsbFiles : s.NonUsbFiles);
-
-        var srcList = usePairs
-            ? matchedSrc
-            : (s.UsbWriteBytes >= s.NonUsbWriteBytes ? s.NonUsbFiles : s.UsbFiles);
-
-        var sourcePath = CommonDirectory(srcList);
-        var destPath = CommonDirectory(destList);
+        var sourcePath = CommonDirectory(srcList);        // PC
+        var destPath = CommonDirectory(destList);       // USB
 
         var deviceName = string.IsNullOrWhiteSpace(s.Device.Label) ? s.Device.DriveLetter : s.Device.Label;
 
@@ -191,17 +171,18 @@ public sealed class SessionManager
             Timestamp: s.Started,
             Computer: Environment.MachineName,
             User: s.User,
-            SourcePath: sourcePath,
-            DestPath: destPath,
+            SourcePath: sourcePath, // stays PC-side
+            DestPath: destPath,     // stays USB-side
             DeviceName: deviceName,
             FileNames: fileNames,
             AttributedTo: attributedTo);
 
         var json = JsonSerializer.Serialize(rec);
 
-        _log.LogInformation("Session closed: {User} → {Device} | {Count} files",
+        _log.LogInformation("Session closed (PC → USB): {User} → {Device} | {Count} files",
                     s.User, s.Device.Label ?? s.Device.DriveLetter, fileNames.Count);
         _log.LogDebug("  Details: {@rec}", rec);
+
         // Local file write (configurable)
         if (_opts.CurrentValue.LocalLoggingEnabled)
         {
@@ -272,7 +253,7 @@ public sealed class SessionManager
         catch { /* ignore */ }
     }
 
-    // ---------------- Helpers ----------------
+    // ---------------- Hint helpers ----------------
 
     private void PurgeOldHints()
     {
@@ -293,18 +274,17 @@ public sealed class SessionManager
         }
     }
 
-    private static bool TryGetValidOppositeHint(
-        Dictionary<string, ReadHint> dict, string basename, bool isUsbDest, out ReadHint hint)
+    private static bool TryGetValidHint(
+        Dictionary<string, ReadHint> dict, string basename, out ReadHint hint)
     {
         hint = default;
         if (!dict.TryGetValue(basename, out var h)) return false;
-        if (DateTimeOffset.Now - h.When > TimeSpan.FromSeconds(5)) return false;
-        if (h.IsUsb == isUsbDest) return false;
+        if (DateTimeOffset.Now - h.When > TimeSpan.FromSeconds(5)) return false; // recent only
         hint = h;
         return true;
     }
 
-    private bool TryFindHintAnyPid(string basename, bool wantUsbSide, out ReadHint hint, string preferredUser = "")
+    private bool TryFindHintAnyPid(string basename, out ReadHint hint, string preferredUser = "")
     {
         hint = default;
         var bestWhen = DateTimeOffset.MinValue;
@@ -312,7 +292,6 @@ public sealed class SessionManager
         foreach (var pidMap in _readHints.Values)
         {
             if (!pidMap.TryGetValue(basename, out var h)) continue;
-            if (h.IsUsb != wantUsbSide) continue;
             if (DateTimeOffset.Now - h.When > _hintTtl) continue;
 
             var scoreBias = (!string.IsNullOrEmpty(preferredUser) &&
@@ -332,21 +311,19 @@ public sealed class SessionManager
         return Path.GetDirectoryName(paths[0]) ?? "";
     }
 
+    // ---------------- Types ----------------
+
     private readonly struct ReadHint
     {
         public DateTimeOffset When { get; }
         public string Path { get; }
-        public bool IsUsb { get; }
         public string User { get; }
-        public DeviceInfo? Device { get; }
 
-        public ReadHint(DateTimeOffset when, string path, bool isUsb, string user, DeviceInfo? device)
+        public ReadHint(DateTimeOffset when, string path, string user)
         {
             When = when;
             Path = path;
-            IsUsb = isUsb;
             User = user;
-            Device = device;
         }
     }
 
@@ -358,10 +335,8 @@ public sealed class SessionManager
         public DeviceInfo Device { get; }
 
         public long UsbWriteBytes { get; private set; }
-        public long NonUsbWriteBytes { get; private set; }
 
         public List<string> UsbFiles { get; } = new();
-        public List<string> NonUsbFiles { get; } = new();
 
         private readonly List<(string Dest, string Src)> _pairs = new();
 
@@ -379,13 +354,12 @@ public sealed class SessionManager
 
         public void Touch(DateTime when) => LastActivity = new DateTimeOffset(when);
 
-        public void AddWrite(string path, long bytes, bool isUsbDest)
+        public void AddUsbWrite(string path, long bytes)
         {
-            if (isUsbDest) { UsbFiles.Add(path); UsbWriteBytes += bytes; }
-            else { NonUsbFiles.Add(path); NonUsbWriteBytes += bytes; }
+            UsbFiles.Add(path);
+            UsbWriteBytes += bytes;
         }
 
-        public void AddNonUsb(string path, long bytes) => NonUsbFiles.Add(path);
         public void AddPair(string dest, string src) => _pairs.Add((dest, src));
         public List<string> MatchedDestFiles() => _pairs.Select(p => p.Dest).ToList();
         public List<string> MatchedSourceFiles() => _pairs.Select(p => p.Src).ToList();

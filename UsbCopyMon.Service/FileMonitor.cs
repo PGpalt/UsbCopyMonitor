@@ -29,7 +29,10 @@ public sealed class FileMonitor
 
         _session.EnableKernelProvider(kws);
 
+        // Keep minimal reads ONLY to learn the PC-side source folder (ignore reads from USB).
         _session.Source.Kernel.FileIORead += d => OnRead(d.FileName, d.ProcessID, d.TimeStamp);
+
+        // Only writes that go TO USB will be recorded (PC → USB).
         _session.Source.Kernel.FileIOWrite += d => OnWrite(d.FileName, d.ProcessID, d.TimeStamp, (long)d.IoSize);
 
         _ = Task.Run(() => _session.Source.Process());
@@ -47,10 +50,12 @@ public sealed class FileMonitor
         var path = NormalizeToDosPath(rawPath);
         if (string.IsNullOrWhiteSpace(path)) return;
 
-        var user = GetProcessUser(pid) ?? string.Empty;
+        // We only keep READ hints if they are from the PC (non-USB).
         var isUsb = _devices.ResolveForPath(path) is not null;
+        if (isUsb) return;
 
-        _sessions.HintRead(pid, when, path, isUsb, user);
+        var user = GetProcessUser(pid) ?? string.Empty;
+        _sessions.HintRead(pid, when, path, user);
     }
 
     private void OnWrite(string? rawPath, int pid, DateTime when, long bytes)
@@ -58,10 +63,12 @@ public sealed class FileMonitor
         var path = NormalizeToDosPath(rawPath);
         if (string.IsNullOrWhiteSpace(path)) return;
 
-        var user = GetProcessUser(pid);
+        // Only proceed if the destination of the write is a USB drive (PC → USB).
         var isUsbDest = _devices.ResolveForPath(path) is not null;
+        if (!isUsbDest) return;
 
-        _sessions.RecordWrite(pid, when, path, bytes, user, isUsbDest);
+        var user = GetProcessUser(pid);
+        _sessions.RecordUsbDestinationWrite(pid, when, path, bytes, user);
     }
 
     // -------------------- Helpers --------------------

@@ -16,6 +16,10 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution 
 		listen-udp.ps1 = listen-udp.ps1
 	EndProjectSection
 EndProject
+Project("{54435603-DBB4-11D2-8724-00A0C9A8B90C}") = "UsbCopyMon.setup", "..\UsbCopyMon.setup\UsbCopyMon.setup\UsbCopyMon.setup.vdproj", "{32560DEC-F442-4076-7956-5FE22F944E78}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "UsbCopyMon.SetupActions", "..\UsbCopyMon.setup\UsbCopyMon.SetupActions\UsbCopyMon.SetupActions.csproj", "{40A71922-F1E1-42B6-AF8D-D7582FAD7B00}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -34,6 +38,14 @@ Global
 		{78E50E4B-304D-47A2-B9B3-1B7AA3A70B42}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{78E50E4B-304D-47A2-B9B3-1B7AA3A70B42}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{78E50E4B-304D-47A2-B9B3-1B7AA3A70B42}.Release|Any CPU.Build.0 = Release|Any CPU
+		{32560DEC-F442-4076-7956-5FE22F944E78}.Debug|Any CPU.ActiveCfg = Debug
+		{32560DEC-F442-4076-7956-5FE22F944E78}.Debug|Any CPU.Build.0 = Debug
+		{32560DEC-F442-4076-7956-5FE22F944E78}.Release|Any CPU.ActiveCfg = Release
+		{32560DEC-F442-4076-7956-5FE22F944E78}.Release|Any CPU.Build.0 = Release
+		{40A71922-F1E1-42B6-AF8D-D7582FAD7B00}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{40A71922-F1E1-42B6-AF8D-D7582FAD7B00}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{40A71922-F1E1-42B6-AF8D-D7582FAD7B00}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{40A71922-F1E1-42B6-AF8D-D7582FAD7B00}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
