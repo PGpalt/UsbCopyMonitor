@@ -1,5 +1,5 @@
 # listen-udp.ps1
-$port = 5514
+$port = 514
 $udp  = New-Object System.Net.Sockets.UdpClient($port)
 $ep   = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any,0)
 Write-Host "Listening on UDP $port ..."

@@ -13,6 +13,7 @@ public sealed class SessionManager
     private readonly DeviceMap _devices;
     private readonly PipeServer _pipe;
     private readonly IOptionsMonitor<UsbCopyMonOptions> _opts;
+    private readonly ILogger<SessionManager> _log;
 
     private readonly ConcurrentDictionary<(int pid, string devId), TransferSession> _open = new();
 
@@ -22,7 +23,13 @@ public sealed class SessionManager
 
     private readonly TimeSpan _idle = TimeSpan.FromSeconds(10);
     private readonly string _logDir;
-    private readonly ILogger<SessionManager> _log;
+
+    // Syslog defaults (Wazuh-friendly)
+    private const string SyslogAppName = "UsbCopyMon";
+    private const string SyslogMsgId = "USB_COPY";
+    private const int SyslogEnterpriseId = 32473; // any stable number you own/use
+    private const int SyslogFacilityLocal0 = 16;  // LOCAL0
+    private const int SyslogSeverityInfo = 6;     // Informational
 
     public SessionManager(DeviceMap devices, PipeServer pipe, IOptionsMonitor<UsbCopyMonOptions> opts, ILogger<SessionManager> log)
     {
@@ -59,7 +66,10 @@ public sealed class SessionManager
         );
 
         var dict = _readHints.GetOrAdd(pid, _ => new Dictionary<string, ReadHint>(StringComparer.OrdinalIgnoreCase));
-        lock (dict) { dict[basename] = hint; }
+        lock (dict)
+        {
+            dict[basename] = hint;
+        }
     }
 
     /// <summary>
@@ -77,6 +87,7 @@ public sealed class SessionManager
 
         // Try to find a PC-side read hint for the same filename
         _readHints.TryGetValue(pid, out var samePidMap);
+
         ReadHint srcHint = default;
         var haveHint = samePidMap is not null && TryGetValidHint(samePidMap, basename, out srcHint);
 
@@ -88,7 +99,7 @@ public sealed class SessionManager
                  : "Unknown";
 
         var key = (pid, usbDev.PnpId);
-        var s = _open.GetOrAdd(key, _ => new TransferSession(when, user, usbDev));
+        var s = _open.GetOrAdd(key, _ => new TransferSession(pid, when, user, usbDev));
         s.Touch(when);
 
         // Respect config: only start attribution if prompts are enabled
@@ -113,7 +124,10 @@ public sealed class SessionManager
                 Sweep();
                 EnforceRetention();
             }
-            catch { /* ignore */ }
+            catch
+            {
+                // ignore
+            }
 
             await Task.Delay(2000, ct);
         }
@@ -144,8 +158,8 @@ public sealed class SessionManager
         var destList = s.UsbFiles;
         var srcList = matchedSrc.Count > 0 ? matchedSrc : new List<string>();
 
-        var sourcePath = CommonDirectory(srcList);        // PC
-        var destPath = CommonDirectory(destList);       // USB
+        var sourcePath = CommonDirectory(srcList); // PC
+        var destPath = CommonDirectory(destList);  // USB
 
         var deviceName = string.IsNullOrWhiteSpace(s.Device.Label) ? s.Device.DriveLetter : s.Device.Label;
 
@@ -158,7 +172,7 @@ public sealed class SessionManager
         }
 
         var fileNames = destList
-            .Select(p => FileNameSansAds(p))
+            .Select(FileNameSansAds)
             .Where(n => !string.IsNullOrEmpty(n))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -171,36 +185,45 @@ public sealed class SessionManager
             Timestamp: s.Started,
             Computer: Environment.MachineName,
             User: s.User,
-            SourcePath: sourcePath, // stays PC-side
-            DestPath: destPath,     // stays USB-side
+            SourcePath: sourcePath,
+            DestPath: destPath,
             DeviceName: deviceName,
             FileNames: fileNames,
             AttributedTo: attributedTo);
 
-        var json = JsonSerializer.Serialize(rec);
-
         _log.LogInformation("Session closed (PC → USB): {User} → {Device} | {Count} files",
-                    s.User, s.Device.Label ?? s.Device.DriveLetter, fileNames.Count);
+            s.User, s.Device.Label ?? s.Device.DriveLetter, fileNames.Count);
+
         _log.LogDebug("  Details: {@rec}", rec);
 
-        // Local file write (configurable)
+        // Local file write (JSONL) - optional per config
         if (_opts.CurrentValue.LocalLoggingEnabled)
         {
+            var json = JsonSerializer.Serialize(rec);
             var path = Path.Combine(_logDir, $"{DateTime.UtcNow:yyyyMMdd}.jsonl");
             File.AppendAllText(path, json + Environment.NewLine);
         }
 
-        // Optional UDP send (fire-and-forget)
+        // Syslog send to Wazuh (RFC5424) - instead of JSON payload
         var udp = _opts.CurrentValue.Syslog;
         if (udp is not null && udp.Enabled)
         {
-            _ = Task.Run(() => SendUdpSafe(json, udp.Ip, udp.Port));
+            var syslog = Syslog.BuildRfc5424(
+                rec: rec,
+                pid: s.Pid,
+                facility: SyslogFacilityLocal0,
+                severity: SyslogSeverityInfo,
+                appName: SyslogAppName,
+                msgId: SyslogMsgId,
+                enterpriseId: SyslogEnterpriseId);
+
+            _ = Task.Run(() => SendSyslogUdpSafe(syslog, udp.Ip, udp.Port));
         }
     }
 
-    // ---------------- UDP helper ----------------
+    // ---------------- Syslog UDP helper ----------------
 
-    private static void SendUdpSafe(string payload, string ip, int port)
+    private static void SendSyslogUdpSafe(string payload, string ip, int port)
     {
         try
         {
@@ -208,12 +231,14 @@ public sealed class SessionManager
 
             using var client = new UdpClient();
             client.Connect(IPAddress.Parse(ip), port);
+
+            // UDP syslog: one message per datagram (no TCP framing)
             var bytes = Encoding.UTF8.GetBytes(payload);
             client.Send(bytes, bytes.Length);
         }
         catch
         {
-            // swallow: logging over UDP is best-effort
+            // best-effort
         }
     }
 
@@ -240,17 +265,21 @@ public sealed class SessionManager
                 try
                 {
                     var fi = new FileInfo(f);
-                    var last = fi.LastWriteTimeUtc; // <-- use filesystem time only
+                    var last = fi.LastWriteTimeUtc;
 
                     if (last < cutoffUtc)
-                    {
                         File.Delete(f);
-                    }
                 }
-                catch { /* ignore per-file errors */ }
+                catch
+                {
+                    // ignore per-file errors
+                }
             }
         }
-        catch { /* ignore */ }
+        catch
+        {
+            // ignore
+        }
     }
 
     // ---------------- Hint helpers ----------------
@@ -259,7 +288,6 @@ public sealed class SessionManager
     {
         foreach (var kv in _readHints.ToArray())
         {
-            var pid = kv.Key;
             var dict = kv.Value;
             lock (dict)
             {
@@ -268,8 +296,9 @@ public sealed class SessionManager
                     if (DateTimeOffset.Now - dict[file].When > _hintTtl)
                         dict.Remove(file);
                 }
+
                 if (dict.Count == 0)
-                    _readHints.TryRemove(pid, out _);
+                    _readHints.TryRemove(kv.Key, out _);
             }
         }
     }
@@ -278,10 +307,13 @@ public sealed class SessionManager
         Dictionary<string, ReadHint> dict, string basename, out ReadHint hint)
     {
         hint = default;
-        if (!dict.TryGetValue(basename, out var h)) return false;
-        if (DateTimeOffset.Now - h.When > TimeSpan.FromSeconds(5)) return false; // recent only
-        hint = h;
-        return true;
+        lock (dict)
+        {
+            if (!dict.TryGetValue(basename, out var h)) return false;
+            if (DateTimeOffset.Now - h.When > TimeSpan.FromSeconds(5)) return false; // recent only
+            hint = h;
+            return true;
+        }
     }
 
     private bool TryFindHintAnyPid(string basename, out ReadHint hint, string preferredUser = "")
@@ -289,17 +321,30 @@ public sealed class SessionManager
         hint = default;
         var bestWhen = DateTimeOffset.MinValue;
 
-        foreach (var pidMap in _readHints.Values)
+        foreach (var kv in _readHints.ToArray())
         {
-            if (!pidMap.TryGetValue(basename, out var h)) continue;
+            var pidMap = kv.Value;
+
+            ReadHint h;
+            lock (pidMap)
+            {
+                if (!pidMap.TryGetValue(basename, out h))
+                    continue;
+            }
+
             if (DateTimeOffset.Now - h.When > _hintTtl) continue;
 
             var scoreBias = (!string.IsNullOrEmpty(preferredUser) &&
                              h.User.Equals(preferredUser, StringComparison.OrdinalIgnoreCase))
-                            ? TimeSpan.FromSeconds(5) : TimeSpan.Zero;
+                ? TimeSpan.FromSeconds(5)
+                : TimeSpan.Zero;
 
             var effectiveWhen = h.When + scoreBias;
-            if (effectiveWhen > bestWhen) { hint = h; bestWhen = effectiveWhen; }
+            if (effectiveWhen > bestWhen)
+            {
+                hint = h;
+                bestWhen = effectiveWhen;
+            }
         }
 
         return bestWhen != DateTimeOffset.MinValue;
@@ -329,13 +374,13 @@ public sealed class SessionManager
 
     private sealed class TransferSession
     {
+        public int Pid { get; }
         public DateTimeOffset Started { get; }
         public DateTimeOffset LastActivity { get; private set; }
         public string User { get; }
         public DeviceInfo Device { get; }
 
         public long UsbWriteBytes { get; private set; }
-
         public List<string> UsbFiles { get; } = new();
 
         private readonly List<(string Dest, string Src)> _pairs = new();
@@ -344,8 +389,9 @@ public sealed class SessionManager
         private Task? _attrTask;
         private string? _attributedTo;
 
-        public TransferSession(DateTime started, string user, DeviceInfo device)
+        public TransferSession(int pid, DateTime started, string user, DeviceInfo device)
         {
+            Pid = pid;
             Started = new DateTimeOffset(started);
             LastActivity = Started;
             User = user;
@@ -369,6 +415,7 @@ public sealed class SessionManager
             lock (_attrLock)
             {
                 if (_attrTask != null) return false; // already started
+
                 _attrTask = Task.Run(async () =>
                 {
                     try
@@ -382,6 +429,7 @@ public sealed class SessionManager
                         _attributedTo = "Unknown";
                     }
                 });
+
                 return true;
             }
         }
@@ -391,5 +439,106 @@ public sealed class SessionManager
             who = _attributedTo;
             return !string.IsNullOrWhiteSpace(who);
         }
+    }
+
+    // ---------------- Syslog formatter (RFC5424) ----------------
+
+    private static class Syslog
+    {
+        public static string BuildRfc5424(
+            CopyLog rec,
+            int pid,
+            int facility,
+            int severity,
+            string appName,
+            string msgId,
+            int enterpriseId)
+        {
+            // PRI = facility*8 + severity
+            var pri = (facility * 8) + severity;
+
+            // VERSION
+            const int version = 1;
+
+            // TIMESTAMP (RFC3339)
+            var ts = rec.Timestamp.ToString("yyyy-MM-ddTHH:mm:ss.fffzzz");
+
+            // HOSTNAME
+            var hostname = string.IsNullOrWhiteSpace(rec.Computer) ? Environment.MachineName : rec.Computer;
+
+            // PROCID
+            var procId = pid > 0 ? pid.ToString() : "-";
+
+            // Structured Data
+            var sd = BuildStructuredData(rec, enterpriseId);
+
+            // MSG (short human-readable)
+            var msg = BuildMsg(rec);
+
+            // <PRI>VERSION TIMESTAMP HOSTNAME APP-NAME PROCID MSGID STRUCTURED-DATA MSG
+            return $"<{pri}>{version} {SanitizeToken(ts)} {SanitizeToken(hostname)} {SanitizeToken(appName)} {SanitizeToken(procId)} {SanitizeToken(msgId)} {sd} {msg}";
+        }
+
+        private static string BuildStructuredData(CopyLog rec, int enterpriseId)
+        {
+            var sdId = $"usbcopymon@{enterpriseId}";
+
+            // Keep file list bounded
+            var files = rec.FileNames is null ? "" : string.Join(",", rec.FileNames);
+            files = Trunc(files, 512);
+
+            var sb = new StringBuilder();
+            sb.Append('[').Append(sdId);
+
+            AppendSd(sb, "user", rec.User);
+            AppendSd(sb, "attributedTo", rec.AttributedTo);
+            AppendSd(sb, "device", rec.DeviceName);
+            AppendSd(sb, "src", rec.SourcePath);
+            AppendSd(sb, "dst", rec.DestPath);
+            AppendSd(sb, "files", files);
+
+            sb.Append(']');
+            return sb.ToString();
+        }
+
+        private static string BuildMsg(CopyLog rec)
+        {
+            var count = rec.FileNames?.Count ?? 0;
+            var src = string.IsNullOrWhiteSpace(rec.SourcePath) ? "-" : rec.SourcePath;
+            var dst = string.IsNullOrWhiteSpace(rec.DestPath) ? "-" : rec.DestPath;
+
+            var msg = $"PC->USB user={rec.User} attributedTo={rec.AttributedTo} device=\"{rec.DeviceName}\" src=\"{src}\" dst=\"{dst}\" files={count}";
+            return SanitizeMsg(msg);
+        }
+
+        private static void AppendSd(StringBuilder sb, string key, string? value)
+        {
+            value ??= "";
+            sb.Append(' ')
+              .Append(key)
+              .Append("=\"")
+              .Append(EscapeSdParam(Trunc(value, 256)))
+              .Append('"');
+        }
+
+        // RFC5424 SD-PARAM escaping: \, ", ] must be escaped with backslash
+        private static string EscapeSdParam(string s) =>
+            s.Replace(@"\", @"\\").Replace("\"", "\\\"").Replace("]", "\\]");
+
+        // Header tokens must not contain spaces; "-" used for NILVALUE
+        private static string SanitizeToken(string? s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return "-";
+            var t = s.Trim();
+            t = t.Replace(" ", "_");
+            return t.Length == 0 ? "-" : t;
+        }
+
+        // Avoid newlines for receivers/parsers
+        private static string SanitizeMsg(string s) =>
+            s.Replace("\r", " ").Replace("\n", " ");
+
+        private static string Trunc(string s, int max) =>
+            s.Length <= max ? s : s[..max];
     }
 }
