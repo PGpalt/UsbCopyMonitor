@@ -2,6 +2,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using UsbCopyMon.Shared;
@@ -31,6 +32,12 @@ public sealed class SessionManager
     private const int SyslogFacilityLocal0 = 16;  // LOCAL0
     private const int SyslogSeverityInfo = 6;     // Informational
 
+    // Keep non-ASCII (e.g., Greek) readable in local JSONL logs (avoid \uXXXX escaping)
+    private static readonly JsonSerializerOptions JsonLogOptions = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
     public SessionManager(DeviceMap devices, PipeServer pipe, IOptionsMonitor<UsbCopyMonOptions> opts, ILogger<SessionManager> log)
     {
         _devices = devices;
@@ -56,6 +63,10 @@ public sealed class SessionManager
     /// </summary>
     public void HintRead(int pid, DateTime when, string path, string user)
     {
+        // Defensive: some network/DFS reads can leak kernel-ish paths (e.g., DfsClient\;X:<hex>\...).
+        // Normalize those so SourcePath is readable and stable.
+        path = SanitizeHintPath(path);
+
         var basename = Path.GetFileName(path);
         if (string.IsNullOrEmpty(basename)) return;
 
@@ -110,7 +121,8 @@ public sealed class SessionManager
         s.AddUsbWrite(destPath, bytes);
 
         // If we found a PC source hint, remember the pairing so SourcePath can be set.
-        if (haveHint) s.AddPair(destPath, srcHint.Path);
+        // Extra safety: sanitize again (covers any stale/previously cached hints).
+        if (haveHint) s.AddPair(destPath, SanitizeHintPath(srcHint.Path));
     }
 
     // ---------------- Background loop ----------------
@@ -199,9 +211,9 @@ public sealed class SessionManager
         // Local file write (JSONL) - optional per config
         if (_opts.CurrentValue.LocalLoggingEnabled)
         {
-            var json = JsonSerializer.Serialize(rec);
+            var json = JsonSerializer.Serialize(rec, JsonLogOptions);
             var path = Path.Combine(_logDir, $"{DateTime.UtcNow:yyyyMMdd}.jsonl");
-            File.AppendAllText(path, json + Environment.NewLine);
+            File.AppendAllText(path, json + Environment.NewLine, Encoding.UTF8);
         }
 
         // Syslog send to Wazuh (RFC5424) - instead of JSON payload
@@ -336,8 +348,7 @@ public sealed class SessionManager
 
             var scoreBias = (!string.IsNullOrEmpty(preferredUser) &&
                              h.User.Equals(preferredUser, StringComparison.OrdinalIgnoreCase))
-                ? TimeSpan.FromSeconds(5)
-                : TimeSpan.Zero;
+                ? TimeSpan.FromSeconds(5) : TimeSpan.Zero;
 
             var effectiveWhen = h.When + scoreBias;
             if (effectiveWhen > bestWhen)
@@ -354,6 +365,40 @@ public sealed class SessionManager
     {
         if (paths.Count == 0) return "";
         return Path.GetDirectoryName(paths[0]) ?? "";
+    }
+
+    private static string SanitizeHintPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return path;
+
+        // DFS/network mapped-drive kernel-ish forms often include a hex blob after the drive:
+        // \Device\DfsClient\;X:0000000000191a10\dir\file
+        // DfsClient\;X:0000000000191a10\dir\file
+        // Normalize to: X:\dir\file
+        var semi = path.IndexOf(';');
+        if (semi >= 0 && semi + 2 < path.Length)
+        {
+            var letter = path[semi + 1];
+            var colon = path[semi + 2];
+            if (char.IsLetter(letter) && colon == ':')
+            {
+                var after = semi + 3; // after ";X:"
+
+                // Skip hex blob up to the next slash/backslash
+                var nextSlash = path.IndexOf('\\', after);
+                if (nextSlash < 0) nextSlash = path.IndexOf('/', after);
+
+                if (nextSlash >= 0)
+                {
+                    var rest = path.Substring(nextSlash).Replace('/', '\\');
+                    return $"{char.ToUpperInvariant(letter)}:{rest}";
+                }
+
+                return $"{char.ToUpperInvariant(letter)}:\\";
+            }
+        }
+
+        return path;
     }
 
     // ---------------- Types ----------------
