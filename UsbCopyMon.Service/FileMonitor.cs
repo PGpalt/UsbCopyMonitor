@@ -13,6 +13,9 @@ public sealed class FileMonitor
     private readonly DeviceMap _devices;
     private readonly SessionManager _sessions;
 
+    // Track ETW processing task so we can see if it died silently.
+    private Task? _processingTask;
+
     // Map FileObject -> last known path (helps when FileIORead/FileIOWrite has empty FileName)
     private readonly ConcurrentDictionary<ulong, NameEntry> _nameByFileObject = new();
     private readonly TimeSpan _nameTtl = TimeSpan.FromMinutes(5);
@@ -38,26 +41,54 @@ public sealed class FileMonitor
 
         // Capture CREATE to learn names reliably (especially for network redirector).
         _session.Source.Kernel.FileIOCreate += d =>
-            OnCreate(d.FileName, (ulong)d.FileObject, d.ProcessID, d.TimeStamp);
+        {
+            try { OnCreate(d.FileName, (ulong)d.FileObject, d.ProcessID, d.TimeStamp); }
+            catch { /* never let handler exceptions kill ETW processing */ }
+        };
 
         // Cleanup map on CLOSE (best-effort).
         _session.Source.Kernel.FileIOClose += d =>
-            _nameByFileObject.TryRemove((ulong)d.FileObject, out _);
+        {
+            try { _nameByFileObject.TryRemove((ulong)d.FileObject, out _); }
+            catch { }
+        };
 
         // Read hints: non-USB reads used to infer SourcePath for PC→USB copies.
         _session.Source.Kernel.FileIORead += d =>
-            OnRead(d.FileName, (ulong)d.FileObject, d.ProcessID, d.TimeStamp);
+        {
+            try { OnRead(d.FileName, (ulong)d.FileObject, d.ProcessID, d.TimeStamp); }
+            catch { }
+        };
 
         // Only writes that go TO USB will be recorded (PC → USB).
         _session.Source.Kernel.FileIOWrite += d =>
-            OnWrite(d.FileName, (ulong)d.FileObject, d.ProcessID, d.TimeStamp, (long)d.IoSize);
+        {
+            try { OnWrite(d.FileName, (ulong)d.FileObject, d.ProcessID, d.TimeStamp, (long)d.IoSize); }
+            catch { }
+        };
 
-        _ = Task.Run(() => _session.Source.Process());
+        // Run processing on background thread; keep a reference so we can detect termination.
+        _processingTask = Task.Run(() =>
+        {
+            try { _session.Source.Process(); }
+            catch
+            {
+                // If you have ILogger here, log. Without it, at least prevent silent swallow at the call site.
+                throw;
+            }
+        });
+
+        // Observe faults so they don't get dropped silently by the runtime.
+        _processingTask.ContinueWith(_ => { }, TaskScheduler.Default);
     }
 
     public void Stop()
     {
         try { _session?.Dispose(); } catch { }
+        _session = null;
+
+        // Processing task will end when session is disposed.
+        _processingTask = null;
     }
 
     // -------------------- Event handlers --------------------

@@ -9,13 +9,39 @@ public sealed class DeviceMap
     private Dictionary<string, DeviceInfo> _map = new(StringComparer.OrdinalIgnoreCase);
     private ManagementEventWatcher? _watcher;
 
+    // Periodic refresh makes the map robust even if WMI events stop firing after device churn.
+    private Timer? _refreshTimer;
+    private volatile int _refreshInProgress = 0;
+
     public void Start()
     {
         Refresh();
+
+        // Safety net: refresh regularly so re-inserted USB drives are re-learned even if WMI watcher dies.
+        // Low frequency to avoid hammering WMI.
+        _refreshTimer = new Timer(_ =>
+        {
+            if (Interlocked.Exchange(ref _refreshInProgress, 1) == 1) return;
+            try { Refresh(); }
+            catch { /* best-effort */ }
+            finally { Interlocked.Exchange(ref _refreshInProgress, 0); }
+        }, null, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
+
         try
         {
             _watcher = new ManagementEventWatcher(new WqlEventQuery("SELECT * FROM Win32_VolumeChangeEvent"));
-            _watcher.EventArrived += (_, __) => Refresh();
+            _watcher.EventArrived += (_, __) =>
+            {
+                // Best-effort refresh on arrival.
+                try { Refresh(); } catch { }
+            };
+
+            // Some systems stop delivering events after device churn; attempt to recreate.
+            _watcher.Stopped += (_, __) =>
+            {
+                try { RestartWatcher(); } catch { }
+            };
+
             _watcher.Start();
         }
         catch { /* best-effort */ }
@@ -23,7 +49,11 @@ public sealed class DeviceMap
 
     public void Stop()
     {
+        try { _refreshTimer?.Dispose(); } catch { }
+
         try { _watcher?.Stop(); } catch { }
+        try { _watcher?.Dispose(); } catch { }
+        _watcher = null;
     }
 
     /// Given a full path (or "E:\"), returns DeviceInfo for a USB-backed drive.
@@ -33,6 +63,31 @@ public sealed class DeviceMap
         var root = Path.GetPathRoot(path);
         if (string.IsNullOrEmpty(root)) return null;
         lock (_gate) return _map.TryGetValue(root, out var di) ? di : null;
+    }
+
+    private void RestartWatcher()
+    {
+        try { _watcher?.Stop(); } catch { }
+        try { _watcher?.Dispose(); } catch { }
+        _watcher = null;
+
+        try
+        {
+            _watcher = new ManagementEventWatcher(new WqlEventQuery("SELECT * FROM Win32_VolumeChangeEvent"));
+            _watcher.EventArrived += (_, __) =>
+            {
+                try { Refresh(); } catch { }
+            };
+            _watcher.Stopped += (_, __) =>
+            {
+                try { RestartWatcher(); } catch { }
+            };
+            _watcher.Start();
+        }
+        catch
+        {
+            // best-effort (timer still covers us)
+        }
     }
 
     private void Refresh()
