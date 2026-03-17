@@ -1,0 +1,6 @@
+<group name="usbcopymon">
+  <rule id="100100" level="5">
+    <decoded_as>usbcopymon-fields</decoded_as>
+    <description>UsbCopyMon: PC to USB copy activity</description>
+  </rule>
+</group>

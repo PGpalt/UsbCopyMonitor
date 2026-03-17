@@ -50,8 +50,8 @@ public sealed class SessionManager
         _opts.OnChange(o => _log.LogInformation("UsbCopyMon options reloaded: {@opts}", o));
 
         _logDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "UsbCopyMon", "logs");
+            AppContext.BaseDirectory,
+            "logs");
         Directory.CreateDirectory(_logDir);
     }
 
@@ -258,14 +258,11 @@ public sealed class SessionManager
 
     private void EnforceRetention()
     {
-        var minutes = _opts.CurrentValue.RetentionMinutes;
         var days = _opts.CurrentValue.RetentionDays;
 
         // Decide cutoff
         DateTime cutoffUtc;
-        if (minutes > 0)
-            cutoffUtc = DateTime.UtcNow.AddMinutes(-minutes);
-        else if (days > 0)
+        if (days > 0)
             cutoffUtc = DateTime.UtcNow.Date.AddDays(-days);
         else
             return; // retention disabled
@@ -549,10 +546,8 @@ public sealed class SessionManager
         private static string BuildMsg(CopyLog rec)
         {
             var count = rec.FileNames?.Count ?? 0;
-            var src = string.IsNullOrWhiteSpace(rec.SourcePath) ? "-" : rec.SourcePath;
-            var dst = string.IsNullOrWhiteSpace(rec.DestPath) ? "-" : rec.DestPath;
-
-            var msg = $"PC->USB user={rec.User} attributedTo={rec.AttributedTo} device=\"{rec.DeviceName}\" src=\"{src}\" dst=\"{dst}\" files={count}";
+            var direction = "PC->USB";
+            var msg = $"{direction} transfer detected files={count}";
             return SanitizeMsg(msg);
         }
 

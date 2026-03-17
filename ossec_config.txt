@@ -1,0 +1,7 @@
+<remote>
+  <connection>syslog</connection>
+  <port>514</port>
+  <protocol>udp</protocol>
+  <local_ip><WAZUH_MANAGER_IP></local_ip>
+  <allowed-ips><Endpoint_Windows_IP></allowed-ips>
+</remote>

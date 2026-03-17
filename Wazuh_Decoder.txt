@@ -1,0 +1,5 @@
+<decoder name="usbcopymon-fields">
+  <prematch type="pcre2">UsbCopyMon\s+\S+\s+USB_COPY\s+\[usbcopymon@\d+</prematch>
+  <regex type="pcre2">^\S+\s+\S+\s+(\S+)\s+UsbCopyMon\s+\S+\s+USB_COPY\s+\[usbcopymon@\d+\s+user="([^"]*)"\s+attributedTo="([^"]*)"\s+device="([^"]*)"\s+src="([^"]*)"\s+dst="([^"]*)"\s+files="([^"]*)"\]</regex>
+  <order>pc_name,srcuser,attributed_to,device,src_path,dst_path,files</order>
+</decoder>
