@@ -132,6 +132,14 @@ public sealed class FileMonitor
         if (!isUsbDest) return;
 
         var user = GetProcessUser(pid);
+
+        if (string.Equals(user, @"NT AUTHORITY\SYSTEM", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(user, @"NT AUTHORITY\LOCAL SERVICE", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(user, @"NT AUTHORITY\NETWORK SERVICE", StringComparison.OrdinalIgnoreCase))
+        {
+            user = null;
+        }
+
         _sessions.RecordUsbDestinationWrite(pid, when, path, bytes, user);
     }
 
