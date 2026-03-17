@@ -103,12 +103,11 @@ public sealed class SessionManager
         var haveHint = samePidMap is not null && TryGetValidHint(samePidMap, basename, out srcHint);
 
         if (!haveHint)
-        {
-            var preferredUser = IsServiceAccount(writeUser) ? "" : writeUser ?? "";
-            haveHint = TryFindHintAnyPid(basename, out srcHint, preferredUser);
-        }
+            haveHint = TryFindHintAnyPid(basename, out srcHint, writeUser ?? "");
 
-        var user = NormalizeChosenUser(srcHint.User, writeUser) ?? "Unknown";
+        var user = !string.IsNullOrEmpty(srcHint.User) ? srcHint.User
+                 : !string.IsNullOrEmpty(writeUser) ? writeUser!
+                 : "Unknown";
 
         var key = (pid, usbDev.PnpId);
         var s = _open.GetOrAdd(key, _ => new TransferSession(pid, when, user, usbDev));
@@ -357,22 +356,6 @@ public sealed class SessionManager
         }
 
         return bestWhen != DateTimeOffset.MinValue;
-    }
-
-    private static bool IsServiceAccount(string? user)
-    {
-        if (string.IsNullOrWhiteSpace(user)) return true;
-
-        return user.Equals(@"NT AUTHORITY\SYSTEM", StringComparison.OrdinalIgnoreCase)
-            || user.Equals(@"NT AUTHORITY\LOCAL SERVICE", StringComparison.OrdinalIgnoreCase)
-            || user.Equals(@"NT AUTHORITY\NETWORK SERVICE", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string? NormalizeChosenUser(string? preferred, string? fallback)
-    {
-        if (!IsServiceAccount(preferred)) return preferred;
-        if (!IsServiceAccount(fallback)) return fallback;
-        return null;
     }
 
     private static string CommonDirectory(List<string> paths)
