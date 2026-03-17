@@ -16,7 +16,7 @@ public sealed class SessionManager
     private readonly IOptionsMonitor<UsbCopyMonOptions> _opts;
     private readonly ILogger<SessionManager> _log;
 
-    private readonly ConcurrentDictionary<(int pid, string devId), TransferSession> _open = new();
+    private readonly ConcurrentDictionary<string, TransferSession> _open = new();
 
     // Read hints: only from PC (non-USB) to infer SourcePath for PC → USB copies.
     private readonly ConcurrentDictionary<int, Dictionary<string, ReadHint>> _readHints = new();
@@ -53,6 +53,30 @@ public sealed class SessionManager
             AppContext.BaseDirectory,
             "logs");
         Directory.CreateDirectory(_logDir);
+    }
+
+    private static bool IsServiceLikeUser(string? user)
+    {
+        if (string.IsNullOrWhiteSpace(user)) return true;
+
+        return user.Equals(@"NT AUTHORITY\SYSTEM", StringComparison.OrdinalIgnoreCase)
+            || user.Equals(@"NT AUTHORITY\LOCAL SERVICE", StringComparison.OrdinalIgnoreCase)
+            || user.Equals(@"NT AUTHORITY\NETWORK SERVICE", StringComparison.OrdinalIgnoreCase)
+            || user.StartsWith(@"NT AUTHORITY\", StringComparison.OrdinalIgnoreCase)
+            || user.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeUserKey(string? user)
+    {
+        if (string.IsNullOrWhiteSpace(user)) return string.Empty;
+        return IsServiceLikeUser(user) ? string.Empty : user.Trim();
+    }
+
+    private static string BuildSessionKey(DeviceInfo device, string? user)
+    {
+        var devId = string.IsNullOrWhiteSpace(device.PnpId) ? device.DriveLetter : device.PnpId;
+        var userKey = NormalizeUserKey(user);
+        return $"{devId}||{userKey}";
     }
 
     // ---------------- API called by FileMonitor ----------------
@@ -105,11 +129,17 @@ public sealed class SessionManager
         if (!haveHint)
             haveHint = TryFindHintAnyPid(basename, out srcHint, writeUser ?? "");
 
-        var user = !string.IsNullOrEmpty(srcHint.User) ? srcHint.User
-                 : !string.IsNullOrEmpty(writeUser) ? writeUser!
-                 : "Unknown";
+        var hintUser = srcHint.User;
+        var finalWriteUser = writeUser ?? string.Empty;
 
-        var key = (pid, usbDev.PnpId);
+        var user =
+            !string.IsNullOrEmpty(hintUser) && !IsServiceLikeUser(hintUser) ? hintUser :
+            !string.IsNullOrEmpty(finalWriteUser) && !IsServiceLikeUser(finalWriteUser) ? finalWriteUser :
+            !string.IsNullOrEmpty(hintUser) ? hintUser :
+            !string.IsNullOrEmpty(finalWriteUser) ? finalWriteUser :
+            "Unknown";
+
+        var key = BuildSessionKey(usbDev, user);
         var s = _open.GetOrAdd(key, _ => new TransferSession(pid, when, user, usbDev));
         s.Touch(when);
 
@@ -444,11 +474,21 @@ public sealed class SessionManager
 
         public void AddUsbWrite(string path, long bytes)
         {
-            UsbFiles.Add(path);
+            if (!UsbFiles.Contains(path, StringComparer.OrdinalIgnoreCase))
+                UsbFiles.Add(path);
+
             UsbWriteBytes += bytes;
         }
 
-        public void AddPair(string dest, string src) => _pairs.Add((dest, src));
+        public void AddPair(string dest, string src)
+        {
+            if (_pairs.Any(p =>
+                    p.Dest.Equals(dest, StringComparison.OrdinalIgnoreCase) &&
+                    p.Src.Equals(src, StringComparison.OrdinalIgnoreCase)))
+                return;
+
+            _pairs.Add((dest, src));
+        }
         public List<string> MatchedDestFiles() => _pairs.Select(p => p.Dest).ToList();
         public List<string> MatchedSourceFiles() => _pairs.Select(p => p.Src).ToList();
 

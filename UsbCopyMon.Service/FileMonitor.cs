@@ -91,6 +91,17 @@ public sealed class FileMonitor
         _processingTask = null;
     }
 
+    private static bool IsServiceLikeUser(string? user)
+    {
+        if (string.IsNullOrWhiteSpace(user)) return true;
+
+        return user.Equals(@"NT AUTHORITY\SYSTEM", StringComparison.OrdinalIgnoreCase)
+            || user.Equals(@"NT AUTHORITY\LOCAL SERVICE", StringComparison.OrdinalIgnoreCase)
+            || user.Equals(@"NT AUTHORITY\NETWORK SERVICE", StringComparison.OrdinalIgnoreCase)
+            || user.StartsWith(@"NT AUTHORITY\", StringComparison.OrdinalIgnoreCase)
+            || user.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase);
+    }
+
     // -------------------- Event handlers --------------------
 
     private void OnCreate(string? rawPath, ulong fileObject, int pid, DateTime when)
@@ -117,6 +128,8 @@ public sealed class FileMonitor
         if (isUsb) return;
 
         var user = GetProcessUser(pid) ?? string.Empty;
+        if (IsServiceLikeUser(user)) return;
+
         _sessions.HintRead(pid, when, path, user);
     }
 
