@@ -22,7 +22,7 @@ public sealed class SessionManager
     private readonly ConcurrentDictionary<int, Dictionary<string, ReadHint>> _readHints = new();
     private readonly TimeSpan _hintTtl = TimeSpan.FromSeconds(60);
 
-    private readonly TimeSpan _idle = TimeSpan.FromSeconds(10);
+    private readonly TimeSpan _idle = TimeSpan.FromSeconds(30);
     private readonly string _logDir;
 
     // Syslog defaults (Wazuh-friendly)
